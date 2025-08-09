@@ -1,19 +1,6 @@
-// Test redeploy
-
 // api/suspect-reply.js
-// Roblox server -> Vercel -> OpenAI -> reply back
-// Expects POST JSON:
-// {
-//   suspectName: "Suspect",
-//   playerQuestion: "Where were you?",
-//   case: { victim, weapon, location:{x,y,z}, suspects:[] },
-//   memory: { trust: 0..100 },
-//   history: [ {role:"user", content:"..."}, {role:"npc", content:"..."} ... ]
-// }
-// Returns: { reply, trust, appendHistory:[{role,content}...] }
-
 export default async function handler(req, res) {
-  // CORS preflight (harmless even if not needed)
+  // CORS preflight (harmless)
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -40,7 +27,6 @@ export default async function handler(req, res) {
     const memory         = body.memory || {};
     const history        = Array.isArray(body.history) ? body.history : [];
 
-    // System rules + case context
     const systemRules = [
       "You are an NPC in a multiplayer murder-mystery Roblox game.",
       `You are roleplaying as ${suspectName}. You may be evasive and only subtly helpful.`,
@@ -52,7 +38,6 @@ export default async function handler(req, res) {
     const caseSummary = `Case: victim=${caseData.victim ?? "Unknown"}, weapon=${caseData.weapon ?? "Unknown"}, location=${JSON.stringify(caseData.location ?? {})}, suspects=${(caseData.suspects ?? []).join(", ")}`;
     const trustLine   = `Player trust level: ${typeof memory.trust === "number" ? memory.trust : 50}.`;
 
-    // Convert short history to OpenAI messages
     const historyMsgs = history
       .map(turn => {
         if (!turn || typeof turn !== "object") return null;
@@ -70,7 +55,7 @@ export default async function handler(req, res) {
       { role: "user", content: playerQuestion || "" }
     ];
 
-    // Call OpenAI via REST (keeps deps minimal)
+    // Native fetch is available on Vercel's Node 18/20 runtimes
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -115,7 +100,6 @@ export default async function handler(req, res) {
 }
 
 export const config = {
-  api: {
-    bodyParser: { sizeLimit: "1mb" }
-  }
+  api: { bodyParser: { sizeLimit: "1mb" } }
 };
+
