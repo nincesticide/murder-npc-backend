@@ -1,49 +1,118 @@
 // api/suspect-reply.js
+// Roblox server -> Vercel -> OpenAI -> reply back
+// Expects POST JSON:
+// {
+//   suspectName: "Suspect",
+//   playerQuestion: "Where were you?",
+//   case: { victim, weapon, location:{x,y,z}, suspects:[] },
+//   memory: { trust: 0..100 },
+//   history: [ {role:"user", content:"..."}, {role:"npc", content:"..."} ... ]
+// }
+// Returns: { reply, trust, appendHistory:[{role,content}...] }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    return res.status(204).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ reply: "Method not allowed." });
   }
 
   try {
-    const { suspectName, playerQuestion } = req.body;
-
-    if (!suspectName || !playerQuestion) {
-      return res.status(400).json({ error: 'Missing suspectName or playerQuestion' });
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({ reply: "Server missing OPENAI_API_KEY." });
     }
 
-    // Call OpenAI API
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const body = req.body || {};
+    const suspectName   = body.suspectName || body.target || "Suspect";
+    const playerQuestion = body.playerQuestion || body.text || "";
+    const caseData      = body.case || {};
+    const memory        = body.memory || {};
+    const history       = Array.isArray(body.history) ? body.history : [];
+
+    // Build system prompt with case context + light behavior rules
+    const systemRules = [
+      "You are an NPC in a multiplayer murder-mystery Roblox game.",
+      `You are roleplaying as ${suspectName}. You may be evasive and only subtly helpful.`,
+      "Keep replies short (1–2 sentences). Stay in-world. Never mention being an AI.",
+      "Hint at real clues sparingly. Do not outright confess unless extremely pressured.",
+      "If the player repeats the same question, get slightly irritated.",
+    ].join(" ");
+
+    const caseSummary = `Case: victim=${caseData.victim ?? "Unknown"}, weapon=${caseData.weapon ?? "Unknown"}, location=${JSON.stringify(caseData.location ?? {})}, suspects=${(caseData.suspects ?? []).join(", ")}`;
+    const trustLine   = `Player trust level: ${typeof memory.trust === "number" ? memory.trust : 50}.`;
+
+    // Convert short history to OpenAI messages
+    const historyMsgs = history
+      .map((turn) => {
+        if (!turn || typeof turn !== "object") return null;
+        if (turn.role === "user") return { role: "user", content: turn.content };
+        if (turn.role === "npc")  return { role: "assistant", content: turn.content };
+        return null;
+      })
+      .filter(Boolean);
+
+    const messages = [
+      { role: "system", content: systemRules },
+      { role: "system", content: caseSummary },
+      { role: "system", content: trustLine },
+      ...historyMsgs,
+      { role: "user", content: playerQuestion || "" },
+    ];
+
+    // Call OpenAI (using REST to avoid bundling SDK)
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini", // cheaper, faster option
-        messages: [
-          {
-            role: "system",
-            content: `You are roleplaying as ${suspectName} in a murder mystery game.
-                      Answer the player's questions in a realistic, short, and in-character way.
-                      Never break character or reveal the murderer unless they guess correctly.`
-          },
-          {
-            role: "user",
-            content: playerQuestion
-          }
-        ],
-        max_tokens: 150
+        model: "gpt-4o-mini",
+        messages,
+        temperature: 0.7,
+        max_tokens: 140,
       }),
     });
 
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "I have nothing to say about that.";
+    if (!resp.ok) {
+      const txt = await resp.text();
+      console.error("OpenAI error:", resp.status, txt);
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      return res.status(502).json({ reply: "…not talking right now." });
+    }
 
-    res.status(200).json({ reply });
-  } catch (error) {
-    console.error("Error:", error);
-    res.status(500).json({ error: 'Internal server error' });
+    const data = await resp.json();
+    const reply = (data?.choices?.[0]?.message?.content || "…").trim();
+
+    // Tiny sample trust tweak (optional)
+    let trust = typeof memory.trust === "number" ? memory.trust : 50;
+    if (/please|help/i.test(playerQuestion)) trust = Math.min(100, trust + 1);
+    if (/confess|liar|admit/i.test(playerQuestion)) trust = Math.max(0, trust - 1);
+
+    const appendHistory = [
+      { role: "user", content: playerQuestion },
+      { role: "npc",  content: reply },
+    ];
+
+    // CORS (handy if you ever call from web dashboards)
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.status(200).json({ reply, trust, appendHistory });
+  } catch (e) {
+    console.error(e);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.status(500).json({ reply: "…not talking right now." });
   }
 }
+
+export const config = {
+  api: {
+    bodyParser: { sizeLimit: "1mb" },
+  },
+};
 Added AI suspect reply endpoint
