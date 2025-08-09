@@ -4,6 +4,8 @@
     "api/*.js": {
       "runtime": "nodejs20.x"
     }
-  }
+  },
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/$1" }
+  ]
 }
-Add vercel.json to configure serverless API
